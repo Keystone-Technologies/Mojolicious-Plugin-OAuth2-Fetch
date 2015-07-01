@@ -59,7 +59,7 @@ sub register {
     my $c = shift;
     my $token = $c->session('token') || {};
     delete $c->session->{$_} foreach keys %{$c->session};
-    $token->{$_} = '' foreach keys %$token;
+    $token->{$_} = {} foreach keys %$token;
     $c->session(token => $token);
     $c->redirect_to($config->{on_logout});
   });
@@ -79,37 +79,43 @@ sub register {
     my ($success, $error, $connect) = ($config->{on_success}, $config->{on_error}, $config->{on_connect});
     my ($args, $fetch, $map) = ($self->providers->{$provider}->{args}, $self->providers->{$provider}->{fetch}, {%{$self->providers->{$provider}->{map}}});
 
-    # if ( $token->{$provider} not expired ) {
-    #   $c->oauth2->providers->{$provider}->{cb}->($c, $token->{$provider}, $config->{on_success}, $config->{on_error}, $config->{on_connect});
-    # } else {
-    #   # refresh access token
-      $c->delay(
-        sub {   
-          my $delay = shift;
+    $c->delay(
+      sub {   
+        my $delay = shift;
+        # Only get the token from $provider if the current one isn't expired
+        if ( $token->{$provider} && $token->{$provider}->{access_token} && $token->{$provider}->{expires_at} && time < $token->{$provider}->{expires_at} ) {
+          my $cb = $delay->begin;
+          $c->$cb(undef, $token->{$provider}); 
+        } else {
           my $args = {redirect_uri => $c->url_for('connectprovider', {provider => $provider})->userinfo(undef)->to_abs, %$args};
           $c->oauth2->get_token($provider => $args, $delay->begin);
-        },
-        sub {
-          my ($delay, $err, $data) = @_;
-          unless ( $token->{$provider} = $data->{access_token} ) {
-            $c->flash(error => "Could not obtain access token: $err");
-            return $c->redirect_to('connect');
+        }
+      },
+      sub {
+        my ($delay, $err, $data) = @_;
+        # If already connected to $provider, no reason to go through this again
+        # All this does is pull down basic info / email and store locally
+        return $c->redirect_to($success) if $connect->($c, $c->session('id'), $provider);
+        unless ( $data->{access_token} ) {
+          $c->flash(error => "Could not obtain access token: $err");
+          return $c->redirect_to($error);
+        }
+        $token->{$provider} = $data;
+        $token->{$provider}->{expires_at} = time + ($token->{$provider}->{expires_in}||3600);
+        $c->session(token => $token);
+        $c->ua->get($self->_fetch($fetch, $token->{$provider}->{access_token}), sub {
+          my ($ua, $tx) = @_;
+          my $json = Mojo::JSON::Pointer->new($tx->res->json);
+          if ( my $error_message = $json->get(delete $map->{error}) ) {
+            $c->flash(error => $error_message);
+            return $c->redirect_to($error);
           }
-          $c->session(token => $token);
-          $c->ua->get($self->_fetch($fetch, $token->{$provider}), sub {
-            my ($ua, $tx) = @_;
-            my $json = Mojo::JSON::Pointer->new($tx->res->json);
-            if ( my $error_message = $json->get(delete $map->{error}) ) {
-              $c->flash(error => $error_message);
-              return $c->redirect_to($error);
-            }
-            $c->session(id => $connect->($c, $json->get($map->{id}))) unless $c->session('id');
-            $connect->($c, $c->session('id'), $provider, $tx->res->json, {map { $_ => $json->get($map->{$_}) } keys %$map});
-            $c->redirect_to($success);
-          });
-        },
-      );
-    # }
+          $c->session(id => $connect->($c, $json->get($map->{id}))) unless $c->session('id');
+          $connect->($c, $c->session('id'), $provider, $tx->res->json, {map { $_ => $json->get($map->{$_}) } keys %$map});
+          $c->redirect_to($success);
+        });
+      },
+    );
   });
 }
 

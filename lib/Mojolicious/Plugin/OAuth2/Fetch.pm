@@ -1,6 +1,8 @@
 package Mojolicious::Plugin::OAuth2::Fetch;
 use Mojo::Base 'Mojolicious::Plugin';
 
+use Mojo::Util 'monkey_patch';
+
 our $VERSION = '0.01';
 
 has on_success => 'connectsuccess';
@@ -8,8 +10,9 @@ has on_error => 'connecterror';
 has on_connect => sub {
   sub {
     my ($c, $oauth2_id, $provider, $json, $results) = @_;
+warn Data::Dumper::Dumper([@_[1..-1]]);
     return undef unless $oauth2_id;
-    $c->session('oauth2.me' => [@_[1..-1]]) if $results;
+    $c->session('oauth2.me' => [@_[1..-1]]) if ref $results && keys %$results;
     $oauth2_id;
   }
 };
@@ -24,8 +27,8 @@ has providers => sub { # Situation for Swagger2?
       },
       fetch => '/mocked/me?access_token=%token%',
       me => {
-        i => 123,
-        e => 'a@a.com',
+        i => join('', map { sprintf("%x", rand 16) } (1..16)),
+        e => 'johndoe@example.com',
         f => 'John',
         l => 'Doe',
       },
@@ -87,25 +90,32 @@ sub register {
 
   $self->providers($providers);
 
-  $app->plugin("OAuth2" => { fix_get_token => 1, %{$config->{providers}} });
+  $app->plugin(OAuth2 => { fix_get_token => 1, %{$config->{providers}} });
 
-  $app->routes->add_condition(is_connected => sub {
+  $app->helper('oauth2.connected' => sub {
+    my $c = shift;
+    $c->redirect_to('connect') unless $c->session('oauth2.id');
+  });
+  $app->helper('oauth2.id' => sub { shift->session('oauth2.id') });
+  $app->helper('oauth2.me' => sub { shift->session('oauth2.me') });
+
+  $app->routes->add_condition('oauth2.is_connected' => sub {
     my ($route, $c, $captures) = @_;
     return $c->session('oauth2.id') ? 1 : 0;
   });
 
-  $app->routes->get("/connect/success");
-  $app->routes->get("/connect/error");
-  $app->routes->get("/connect/disconnect");
+  $app->routes->get('/connect/success');
+  $app->routes->get('/connect/error');
+  $app->routes->get('/connect/disconnect');
 
   # This might be better in M::P::OAuth2
-  $app->routes->get("/mocked/me" => sub {
+  $app->routes->get('/mocked/me' => sub {
     my $c = shift;
     return $c->render(json => {err => ['Invalid access token']}) unless $c->param('access_token') eq 'fake_token';
     $c->render(json => $self->providers->{mocked}->{me});
   });
 
-  $app->routes->get("/connect" => sub {
+  $app->routes->get('/connect' => sub {
     my $c = shift;
     my $provider = $c->session('oauth2.provider');
     return $c->redirect_to('connectprovider', {provider => $provider}) if $provider;
@@ -113,7 +123,7 @@ sub register {
     $c->render_maybe('connect') or $c->redirect_to('connectprovider', {provider => $self->default_provider});
   });
 
-  $app->routes->get("/connect/:provider" => sub {
+  $app->routes->get('/connect/:provider' => sub {
     my $c = shift;
 
     my $provider = $c->param('provider');

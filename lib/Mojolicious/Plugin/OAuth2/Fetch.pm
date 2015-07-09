@@ -3,16 +3,20 @@ use Mojo::Base 'Mojolicious::Plugin';
 
 our $VERSION = '0.01';
 
-has on_success => 'success';
-has on_error => 'error';
+has on_success => 'connectsuccess';
+has on_error => 'connecterror';
 has on_connect => sub {
-  my ($c, $oauth2_id, $provider, $json, $results) = @_;
-  $c->session('oauth2.me' => {id => $oauth2_id, provider => $provider, json => $json, results => $results});
+  sub {
+    my ($c, $oauth2_id, $provider, $json, $results) = @_;
+    return undef unless $oauth2_id;
+    $c->session('oauth2.me' => [@_[1..-1]]) if $results;
+    $oauth2_id;
+  }
 };
-has on_disconnect => '/';
+has on_disconnect => 'connectdisconnect';
 
-has 'default_provider';
-has providers => sub {
+has 'default_provider' => sub { shift->providers->{mocked} ? 'mocked' : undef };
+has providers => sub { # Situation for Swagger2?
   return {
     mocked => {
       args => {
@@ -66,6 +70,8 @@ sub register {
   $self->on_connect($config->{on_connect}) if $config->{on_connect};
   $self->on_disconnect($config->{on_disconnect}) if $config->{on_disconnect};
 
+  push @{$app->renderer->classes}, __PACKAGE__;
+
   my $providers = $self->providers;
 
   foreach my $provider (keys %{$config->{providers}}) {
@@ -83,6 +89,16 @@ sub register {
 
   $app->plugin("OAuth2" => { fix_get_token => 1, %{$config->{providers}} });
 
+  $app->routes->add_condition(is_connected => sub {
+    my ($route, $c, $captures) = @_;
+    return $c->session('oauth2.id') ? 1 : 0;
+  });
+
+  $app->routes->get("/connect/success");
+  $app->routes->get("/connect/error");
+  $app->routes->get("/connect/disconnect");
+
+  # This might be better in M::P::OAuth2
   $app->routes->get("/mocked/me" => sub {
     my $c = shift;
     return $c->render(json => {err => ['Invalid access token']}) unless $c->param('access_token') eq 'fake_token';
@@ -93,7 +109,7 @@ sub register {
     my $c = shift;
     my $provider = $c->session('oauth2.provider');
     return $c->redirect_to('connectprovider', {provider => $provider}) if $provider;
-    $c->stash(providers => grep { $self->providers->{$provider}->{key} } keys %{$self->providers});
+    $c->stash(providers => grep { $self->providers->{$_}->{key} } keys %{$self->providers});
     $c->render_maybe('connect') or $c->redirect_to('connectprovider', {provider => $self->default_provider});
   });
 
@@ -101,9 +117,9 @@ sub register {
     my $c = shift;
 
     my $provider = $c->param('provider');
-    my $token = $c->session('oauth2.token');
     $c->session('oauth2.provider' => $provider) unless $c->session('oauth2.provider');
     $c->session('oauth2.token' => {}) unless $c->session('oauth2.token');
+    my $token = $c->session('oauth2.token');
 
     my $this_provider = $self->providers->{$provider};
     return $c->reply->not_found unless $this_provider && $this_provider->{key};
@@ -138,32 +154,19 @@ sub register {
     );
   });
 
-  $app->routes->get('/disconnect' => sub {
-    my $c = shift;
-    my $token = $c->session('oauth2.token') || {};
-    my $provider = $c->session('oauth2.provider') || '';
-    my $me = $c->session('oauth2.me') || {};
-    delete $c->session->{$_} foreach keys %{$c->session};
-    $token->{$_} = {} foreach keys %$token;
-    $c->session('oauth2.token' => $token);
-    $c->session('oauth2.provider' => $provider);
-    $c->session('oauth2.me' => $me);
-    $self->_on_disconnect($c);
-  });
+  $app->routes->get('/disconnect' => sub { $self->_on_disconnect(shift) });
 }
 
 sub _on_success {
   my ($self, $c) = @_;
-  return $c->reply->exception('on_success must not be a ref') if ref $self->on_success;
-  $c->redirect_to($self->on_success);
+  $c->redirect_to(ref $self->on_success ? $self->on_success->($c) : $self->on_success);
 }
 
 sub _on_error {
   my ($self, $c, $error) = @_;
-  return $c->reply->exception('on_error must not be a ref') if ref $self->on_error;
   return undef unless $error;
   $c->flash(error => $error);
-  $c->redirect_to($self->on_error);
+  $c->redirect_to(ref $self->on_error ? $self->on_error->($c) : $self->on_error);
 }
 
 sub _on_connect {
@@ -194,26 +197,31 @@ sub _on_connect {
 
 sub _on_disconnect {
   my ($self, $c) = @_;
-  return $c->reply->exception('on_disconnect must not be a ref') if ref $self->on_disconnect;
-  $c->redirect_to($self->on_disconnect);
+  delete $c->session->{$_} foreach grep { !/^oauth2\.provider$/ } keys %{$c->session};
+  $c->session('oauth2.token' => { map { $_ => {} } keys %{$c->session->{'oauth2.token'}}});
+  $c->redirect_to(ref $self->on_disconnect ? $self->on_disconnect->($c) : $self->on_disconnect);
 }
 
 1;
 
 __DATA__
 
-@@ success.html.ep
-Success!
+@@ layouts/connect.html.ep
+<%= content %>
+<%= link_to Top => '/' %>
 
-@@ error.html.ep
+@@ connectsuccess.html.ep
+% layout 'connect';
+Success!<br />
+
+@@ connecterror.html.ep
+% layout 'connect';
 % if ( my $error = flash 'error' ) {
 Error!  <%= $error %>
 % }
 
-@@ connect.html.ep
-Connect!
-
-@@ disconnect.html.ep
+@@ connectdisconnect.html.ep
+% layout 'connect';
 Disconnect!
 
 __END__

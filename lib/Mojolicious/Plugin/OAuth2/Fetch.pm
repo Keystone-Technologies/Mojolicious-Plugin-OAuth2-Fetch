@@ -10,9 +10,8 @@ has on_error => 'connecterror';
 has on_connect => sub {
   sub {
     my ($c, $oauth2_id, $provider, $json, $results) = @_;
-warn Data::Dumper::Dumper([@_[1..-1]]);
-    return undef unless $oauth2_id;
-    $c->session('oauth2.me' => [@_[1..-1]]) if ref $results && keys %$results;
+    return undef unless $c && $oauth2_id;
+    $c->session('oauth2.me' => $results) if ref $results && keys %$results;
     $oauth2_id;
   }
 };
@@ -66,6 +65,8 @@ has providers => sub { # Situation for Swagger2?
 
 sub register {
   my ($self, $app, $config) = @_;
+
+  ($config and keys %$config) or ($config = $app->config and $config->{providers} = $config->{oauth2});
 
   $self->default_provider($config->{default_provider}) if $config->{default_provider};
   $self->on_success($config->{on_success}) if $config->{on_success};
@@ -207,8 +208,7 @@ sub _on_connect {
 
 sub _on_disconnect {
   my ($self, $c) = @_;
-  delete $c->session->{$_} foreach grep { !/^oauth2\.provider$/ } keys %{$c->session};
-  $c->session('oauth2.token' => { map { $_ => {} } keys %{$c->session->{'oauth2.token'}}});
+  delete $c->session->{$_} foreach grep { $_ ne 'oauth2.provider' } keys %{$c->session};
   $c->redirect_to(ref $self->on_disconnect ? $self->on_disconnect->($c) : $self->on_disconnect);
 }
 
@@ -217,12 +217,12 @@ sub _on_disconnect {
 __DATA__
 
 @@ layouts/connect.html.ep
-<%= content %>
+<%= content %><br />
 <%= link_to Top => '/' %>
 
 @@ connectsuccess.html.ep
 % layout 'connect';
-Success!<br />
+Success!
 
 @@ connecterror.html.ep
 % layout 'connect';
